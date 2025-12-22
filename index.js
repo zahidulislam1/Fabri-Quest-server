@@ -2,14 +2,14 @@ const express = require("express");
 const cors = require("cors");
 const app = express();
 require("dotenv").config();
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const port = process.env.PORT || 3000;
 
 //middleware
 app.use(express.json());
 app.use(
   cors({
-    origin: ["http://localhost:5173"],
+    origin: [process.env.CLIENT_DOMAIN],
     credentials: true,
   })
 );
@@ -41,7 +41,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     const db = client.db("fabri-quest-db");
     const productsCollection = db.collection("products");
@@ -62,12 +62,21 @@ async function run() {
       const result = await productsCollection.find().toArray();
       res.send(result);
     });
+
     app.get("/latest-products", async (req, res) => {
       const result = await productsCollection
         .find()
         .sort({ createdAt: -1 })
         .limit(6)
         .toArray();
+      res.send(result);
+    });
+    // get  product from db
+    app.get("/products/:id", async (req, res) => {
+      const id = req.params.id;
+      const result = await productsCollection.findOne({
+        _id: new ObjectId(id),
+      });
       res.send(result);
     });
     //save a user data in db
@@ -96,10 +105,8 @@ async function run() {
       res.send(result);
     });
 
-    
-
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
+    // await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
