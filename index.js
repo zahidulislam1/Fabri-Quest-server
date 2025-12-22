@@ -49,8 +49,25 @@ async function run() {
 
     //save a product data in db
     app.post("/products", async (req, res) => {
-      const productData = req.body;
-      const result = await productsCollection.insertOne(productData);
+      const product = req.body;
+      const newProduct = {
+        ...product,
+        createdAt: new Date().toISOString(),
+      };
+      const result = await productsCollection.insertOne(newProduct);
+      res.send(result);
+    });
+    //get all products form db
+    app.get("/products", async (req, res) => {
+      const result = await productsCollection.find().toArray();
+      res.send(result);
+    });
+    app.get("/latest-products", async (req, res) => {
+      const result = await productsCollection
+        .find()
+        .sort({ createdAt: -1 })
+        .limit(6)
+        .toArray();
       res.send(result);
     });
     //save a user data in db
@@ -79,11 +96,7 @@ async function run() {
       res.send(result);
     });
 
-    //get all products form db
-    app.get("/products", async (req, res) => {
-      const result = await productsCollection.find().toArray();
-      res.send(result);
-    });
+    
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
