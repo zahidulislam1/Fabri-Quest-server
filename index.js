@@ -1,7 +1,8 @@
 const express = require("express");
+require("dotenv").config();
 const cors = require("cors");
 const app = express();
-require("dotenv").config();
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const port = process.env.PORT || 3000;
 
@@ -46,6 +47,7 @@ async function run() {
     const db = client.db("fabri-quest-db");
     const productsCollection = db.collection("products");
     const usersCollection = db.collection("users");
+    const orderCollection = db.collection("orders");
 
     //save a product data in db
     app.post("/products", async (req, res) => {
@@ -102,6 +104,103 @@ async function run() {
       }
 
       const result = await usersCollection.insertOne(userData);
+      res.send(result);
+    });
+    //payment endpoints
+    app.post("/create-checkout-session", async (req, res) => {
+      const orderInfo = req.body;
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            price_data: {
+              currency: "usd",
+              product_data: {
+                name: orderInfo?.buyerName,
+                description: orderInfo?.description,
+                images: [orderInfo?.image],
+              },
+              unit_amount: orderInfo?.price * 100,
+            },
+            quantity: orderInfo?.orderQty,
+          },
+        ],
+        customer_email: orderInfo?.buyer.email,
+        mode: "payment",
+        metadata: {
+          productId: orderInfo?.productId,
+          customer: orderInfo?.buyer.email,
+          orderQty: orderInfo?.orderQty,
+        },
+        success_url: `${process.env.CLIENT_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.CLIENT_DOMAIN}/product/${orderInfo?.productId}`,
+      });
+      res.send({ url: session.url });
+    });
+    app.post("/payment-success", async (req, res) => {
+      const { sessionId } = req.body;
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+      // console.log(session);
+      const product = await productsCollection.findOne({
+        _id: new ObjectId(session.metadata.productId),
+      });
+      const order = await orderCollection.findOne({
+        transactionId: session.payment_intent,
+      });
+
+      if (session.status === "complete" && product && !order) {
+        //save order data in db
+        const orderInfo = {
+          productId: session.metadata.productId,
+          transactionId: session.payment_intent,
+          buyerName: session.metadata.customer,
+          status: "pending",
+          paymentStatus: "paid",
+          managerDetails: product.managerDetails,
+          title: product.title,
+          category: product.category,
+          orderQty: session.metadata.orderQty,
+          price: session.amount_total / 100,
+          createdAt: new Date().toISOString(),
+        };
+        // console.log(orderInfo);
+        const result = await orderCollection.insertOne(orderInfo);
+        await productsCollection.updateOne(
+          {
+            _id: new ObjectId(session.metadata.productId),
+          },
+          { $inc: { quantity: -Number(session.metadata.orderQty) } }
+        );
+        return res.send({
+          transactionId: session.payment_intent,
+          orderId: result.insertedId,
+        });
+      }
+      res.send({
+        transactionId: session.payment_intent,
+        orderId: order,
+      });
+    });
+
+    //get all order by email
+    app.get("/my-orders/:email", async (req, res) => {
+      const email = req.params.email;
+      const result = await orderCollection.find({ customer: email }).toArray();
+      res.send(result);
+    });
+    //
+    app.get("/pending-orders/:email", async (req, res) => {
+      const email = req.params.email;
+      const result = await orderCollection
+        .find({ "managerDetails.email": email })
+        .toArray();
+      res.send(result);
+    });
+    //
+    app.get("/manage-products/:email", async (req, res) => {
+      const email = req.params.email;
+      const result = await productsCollection
+        .find({ "managerDetails.email": email })
+        .toArray();
       res.send(result);
     });
 
