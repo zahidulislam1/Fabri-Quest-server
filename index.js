@@ -5,32 +5,53 @@ const app = express();
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const port = process.env.PORT || 3000;
+const crypto = require("crypto");
+const admin = require("firebase-admin");
+
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf8",
+);
+const serviceAccount = JSON.parse(decoded);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+function generateTrackingId() {
+  const prefix = "PRCL"; // your brand prefix
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYYYMMDD
+  const random = crypto.randomBytes(3).toString("hex").toUpperCase(); // 6-char random hex
+
+  return `${prefix}-${date}-${random}`;
+}
 
 //middleware
 app.use(express.json());
 app.use(
   cors({
-    origin: [process.env.CLIENT_DOMAIN],
+    origin: [process.env.CLIENT_DOMAIN, "https://fabriquestbd.netlify.app"],
     credentials: true,
-  })
+  }),
 );
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.jmftqsk.mongodb.net/?appName=Cluster0S`;
 
 // jwt middlewares
-// const verifyJWT = async (req, res, next) => {
-//   const token = req?.headers?.authorization?.split(' ')[1]
-//   console.log(token)
-//   if (!token) return res.status(401).send({ message: 'Unauthorized Access!' })
-//   try {
-//     const decoded = await admin.auth().verifyIdToken(token)
-//     req.tokenEmail = decoded.email
-//     console.log(decoded)
-//     next()
-//   } catch (err) {
-//     console.log(err)
-//     return res.status(401).send({ message: 'Unauthorized Access!', err })
-//   }}
+const verifyJWT = async (req, res, next) => {
+  const token = req?.headers?.authorization?.split(" ")[1];
+  // console.log(token);
+  if (!token) return res.status(401).send({ message: "Unauthorized Access!" });
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.tokenEmail = decoded.email;
+    // console.log(decoded);
+    next();
+  } catch (err) {
+    // console.log(err);
+    return res.status(401).send({ message: "Unauthorized Access!", err });
+  }
+};
+
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
@@ -49,8 +70,30 @@ async function run() {
     const usersCollection = db.collection("users");
     const orderCollection = db.collection("orders");
 
+    // role middlewares
+    const verifyADMIN = async (req, res, next) => {
+      const email = req.tokenEmail;
+      const user = await usersCollection.findOne({ email });
+      if (user?.role !== "admin")
+        return res
+          .status(403)
+          .send({ message: "Admin only Actions!", role: user?.role });
+
+      next();
+    };
+    const verifyMANAGER = async (req, res, next) => {
+      const email = req.tokenEmail;
+      const user = await usersCollection.findOne({ email });
+      if (user?.role !== "seller")
+        return res
+          .status(403)
+          .send({ message: "Seller only Actions!", role: user?.role });
+
+      next();
+    };
+
     //save a product data in db
-    app.post("/products", async (req, res) => {
+    app.post("/products", verifyJWT, verifyMANAGER, async (req, res) => {
       const product = req.body;
       const newProduct = {
         ...product,
@@ -74,7 +117,7 @@ async function run() {
       res.send(result);
     });
     // get  product from db
-    app.get("/products/:id", async (req, res) => {
+    app.get("/products/:id", verifyJWT, async (req, res) => {
       const id = req.params.id;
       const result = await productsCollection.findOne({
         _id: new ObjectId(id),
@@ -82,7 +125,7 @@ async function run() {
       res.send(result);
     });
     //save a user data in db
-    app.post("/users", async (req, res) => {
+    app.post("/user", async (req, res) => {
       const userData = req.body;
       userData.created_at = new Date().toISOString();
       userData.last_loggedIn = new Date().toISOString();
@@ -136,6 +179,7 @@ async function run() {
       });
       res.send({ url: session.url });
     });
+    // payment success
     app.post("/payment-success", async (req, res) => {
       const { sessionId } = req.body;
       const session = await stripe.checkout.sessions.retrieve(sessionId);
@@ -152,7 +196,7 @@ async function run() {
         const orderInfo = {
           productId: session.metadata.productId,
           transactionId: session.payment_intent,
-          buyerName: session.metadata.customer,
+          buyerEmail: session.metadata.customer,
           status: "pending",
           paymentStatus: "paid",
           managerDetails: product.managerDetails,
@@ -161,6 +205,7 @@ async function run() {
           orderQty: session.metadata.orderQty,
           price: session.amount_total / 100,
           createdAt: new Date().toISOString(),
+          trackingId: generateTrackingId(),
         };
         // console.log(orderInfo);
         const result = await orderCollection.insertOne(orderInfo);
@@ -168,7 +213,7 @@ async function run() {
           {
             _id: new ObjectId(session.metadata.productId),
           },
-          { $inc: { quantity: -Number(session.metadata.orderQty) } }
+          { $inc: { quantity: -Number(session.metadata.orderQty) } },
         );
         return res.send({
           transactionId: session.payment_intent,
@@ -180,34 +225,148 @@ async function run() {
         orderId: order,
       });
     });
+    //Cash on Delivery order insert
+    app.post("/create-orders", verifyJWT, verifyMANAGER, async (req, res) => {
+      const orderInfo = req.body;
+      const newOrder = {
+        ...orderInfo,
+        createdAt: new Date().toISOString(),
+        status: "pending",
+        paymentStatus: "Cash on Delivery",
+      };
+      const result = await orderCollection.insertOne(newOrder);
+      res.send(result);
+    });
 
     //get all order by email
-    app.get("/my-orders/:email", async (req, res) => {
-      const email = req.params.email;
-      const result = await orderCollection.find({ customer: email }).toArray();
-      res.send(result);
-    });
-    //
-    app.get("/pending-orders/:email", async (req, res) => {
+    app.get("/my-orders/:email", verifyJWT, async (req, res) => {
       const email = req.params.email;
       const result = await orderCollection
-        .find({ "managerDetails.email": email })
+        .find({ buyerEmail: email })
         .toArray();
       res.send(result);
     });
-    //
-    app.get("/manage-products/:email", async (req, res) => {
-      const email = req.params.email;
-      const result = await productsCollection
-        .find({ "managerDetails.email": email })
+    // pending order
+    app.get(
+      "/pending-orders/:email",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const email = req.params.email;
+        const result = await orderCollection
+          .find({
+            "managerDetails.email": email,
+            status: "pending",
+          })
+          .toArray();
+        res.send(result);
+      },
+    );
+    ///approve-orders
+    app.get(
+      "/approve-orders/:email",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const email = req.params.email;
+        const result = await orderCollection
+          .find({ "managerDetails.email": email, status: "approved" })
+          .toArray();
+        res.send(result);
+      },
+    );
+    // manage order
+    app.get(
+      "/manage-products/:email",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const email = req.params.email;
+        const result = await productsCollection
+          .find({ "managerDetails.email": email })
+          .toArray();
+        res.send(result);
+      },
+    );
+    // get a user's role
+    app.get("/user/role", verifyJWT, async (req, res) => {
+      const result = await usersCollection.findOne({ email: req.tokenEmail });
+      res.send({ role: result?.role });
+    });
+    // user find for admin
+    app.get("/users", verifyJWT, verifyADMIN, async (req, res) => {
+      const adminEmail = req.tokenEmail;
+      const result = await usersCollection
+        .find({ email: { $ne: adminEmail } })
         .toArray();
       res.send(result);
+    });
+    //all order for admin
+    app.get("/all-orders", verifyJWT, verifyADMIN, async (req, res) => {
+      const result = await orderCollection.find().toArray();
+      res.send(result);
+    });
+    // update a users status
+    app.patch("/update-user-status", verifyJWT, async (req, res) => {
+      const { email, status } = req.body;
+      const result = await usersCollection.updateOne(
+        { email },
+        { $set: { status } },
+      );
+      res.send(result);
+    });
+    // update a order status
+    app.patch(
+      "/update-order-status",
+      verifyJWT,
+      verifyMANAGER,
+      async (req, res) => {
+        const { id, status } = req.body;
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status, approvedAt: new Date().toISOString() } },
+        );
+        res.send(result);
+      },
+    );
+    //update product
+    app.patch("/update-product", verifyJWT, async (req, res) => {
+      const product = req.body;
+      const { _id, ...rest } = product;
+
+      const updateProduct = { ...rest, updateAt: new Date().toISOString() };
+      const result = await productsCollection.updateOne(
+        { _id: new ObjectId(product._id) },
+        { $set: updateProduct },
+      );
+      console.log(result);
+      res.send(result);
+    });
+    // Delete product
+    app.delete("/delete-product", verifyJWT, async (req, res) => {
+      try {
+        const { _id } = req.body;
+        console.log("Deleting ID:", _id);
+
+        if (!_id) {
+          return res.status(400).send({ message: "Product ID missing" });
+        }
+
+        const result = await productsCollection.deleteOne({
+          _id: new ObjectId(_id),
+        });
+
+        res.send(result); // returns { acknowledged: true, deletedCount: 1 }
+      } catch (error) {
+        console.log(error);
+        res.status(500).send({ message: "Delete failed" });
+      }
     });
 
     // Send a ping to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
     console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
+      "Pinged your deployment. You successfully connected to MongoDB!",
     );
   } finally {
     // Ensures that the client will close when you finish/error
@@ -215,6 +374,9 @@ async function run() {
   }
 }
 run().catch(console.dir);
+app.get("/", (req, res) => {
+  res.send("hello......");
+});
 
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
