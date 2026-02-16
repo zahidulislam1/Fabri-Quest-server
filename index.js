@@ -84,10 +84,10 @@ async function run() {
     const verifyMANAGER = async (req, res, next) => {
       const email = req.tokenEmail;
       const user = await usersCollection.findOne({ email });
-      if (user?.role !== "seller")
+      if (user?.role !== "manager")
         return res
           .status(403)
-          .send({ message: "Seller only Actions!", role: user?.role });
+          .send({ message: "Manager only Actions!", role: user?.role });
 
       next();
     };
@@ -117,7 +117,7 @@ async function run() {
       res.send(result);
     });
     // get  product from db
-    app.get("/products/:id", verifyJWT, async (req, res) => {
+    app.get("/products/:id", async (req, res) => {
       const id = req.params.id;
       const result = await productsCollection.findOne({
         _id: new ObjectId(id),
@@ -167,11 +167,11 @@ async function run() {
             quantity: orderInfo?.orderQty,
           },
         ],
-        customer_email: orderInfo?.buyer.email,
+        customer_email: orderInfo?.buyerEmail,
         mode: "payment",
         metadata: {
           productId: orderInfo?.productId,
-          customer: orderInfo?.buyer.email,
+          customer: orderInfo?.buyerEmail,
           orderQty: orderInfo?.orderQty,
         },
         success_url: `${process.env.CLIENT_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
@@ -226,7 +226,7 @@ async function run() {
       });
     });
     //Cash on Delivery order insert
-    app.post("/create-orders", verifyJWT, verifyMANAGER, async (req, res) => {
+    app.post("/create-orders", verifyJWT, async (req, res) => {
       const orderInfo = req.body;
       const newOrder = {
         ...orderInfo,
